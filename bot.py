@@ -29,11 +29,6 @@ def db_setup():
         balance INTEGER DEFAULT 0, votes INTEGER DEFAULT 0, 
         withdrawn INTEGER DEFAULT 0, referrer_id INTEGER, ref_paid INTEGER DEFAULT 0)''')
     
-    cursor.execute("PRAGMA table_info(users)")
-    cols = [c[1] for c in cursor.fetchall()]
-    if 'name' not in cols: cursor.execute("ALTER TABLE users ADD COLUMN name TEXT")
-    if 'ref_paid' not in cols: cursor.execute("ALTER TABLE users ADD COLUMN ref_paid INTEGER DEFAULT 0")
-
     cursor.execute('''CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, title TEXT, url TEXT)''')
     
@@ -76,35 +71,24 @@ async def check_sub(user_id):
     for (ch_id,) in rows:
         try:
             m = await bot.get_chat_member(ch_id, user_id)
-            if m.status in['left', 'kicked']: return False
+            if m.status in['left', 'kicked', 'member_not_found']: return False
         except: return False
     return True
 
-async def reward_referrer(user_id):
-    cursor.execute("SELECT referrer_id, ref_paid FROM users WHERE user_id=?", (user_id,))
-    row = cursor.fetchone()
-    if row and row[0] and row[1] == 0:
-        ref_id = row[0]
-        ref_price = int(get_config('ref_price'))
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (ref_price, ref_id))
-        cursor.execute("UPDATE users SET ref_paid = 1 WHERE user_id=?", (user_id,))
-        conn.commit()
-        try: await bot.send_message(ref_id, f"🎉 <b>Yangi referal!</b>\nSizga {ref_price} so'm berildi.", parse_mode="HTML")
-        except: pass
-
 # --- STATES ---
+class UserStates(StatesGroup):
+    get_phone_for_vote = State()
+    waiting_for_screenshot = State()
+    withdraw_method = State()
+    withdraw_details = State()
+    withdraw_amount = State()
+
 class AdminState(StatesGroup):
     broadcast_text = State()
     broadcast_forward = State()
     add_ch_id = State()
     add_ch_title = State()
     add_ch_url = State()
-    pay_channel = State()
-
-class UserStates(StatesGroup):
-    withdraw_method = State()
-    withdraw_details = State()
-    withdraw_amount = State()
 
 # --- KLAVIATURALAR ---
 def main_menu(user_id):
@@ -118,8 +102,7 @@ def main_menu(user_id):
 def admin_panel_kb():
     kb = ReplyKeyboardBuilder()
     kb.row(types.KeyboardButton(text="✉️ Oddiy xabar"), types.KeyboardButton(text="📩 Forward xabar"))
-    kb.row(types.KeyboardButton(text="📄 Ulangan kanallar"), types.KeyboardButton(text="📤 To'lovlar kanali"))
-    kb.row(types.KeyboardButton(text="📢 Kanal ulash"), types.KeyboardButton(text="🔇 Kanal uzish"))
+    kb.row(types.KeyboardButton(text="📄 Ulangan kanallar"), types.KeyboardButton(text="📢 Kanal ulash"))
     kb.row(types.KeyboardButton(text="📊 Statistika"), types.KeyboardButton(text="🏠 Orqaga"))
     return kb.as_markup(resize_keyboard=True)
 
@@ -146,7 +129,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
             if p_ref != u_id: ref_id = p_ref
         cursor.execute("INSERT INTO users (user_id, username, name, referrer_id) VALUES (?, ?, ?, ?)", (u_id, username, name, ref_id))
         conn.commit()
-        if ref_id: await log_to_group(f"👤 {name}\n🆔 {u_id}\nTaklif qildi: {ref_id}\n✅ Yangi foydalanuvchi")
 
     if not await check_sub(u_id):
         kb = InlineKeyboardBuilder()
@@ -154,9 +136,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         for t, u in cursor.fetchall(): kb.button(text=t, url=u)
         kb.button(text="✅ Tasdiqlash", callback_data="recheck")
         kb.adjust(1)
-        return await message.answer("❌ <b>Kanallarga obuna bo'ling:</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+        return await message.answer("❌ <b>Botdan foydalanish uchun quyidagi kanallarga obuna bo'lishingiz shart:</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
 
-    await reward_referrer(u_id)
     start_msg = get_config('start_text').replace("{name}", html.escape(name))
     vid_id = get_config('start_video_id')
     
@@ -171,86 +152,94 @@ async def cmd_start(message: types.Message, state: FSMContext):
     except:
         await message.answer(start_msg, reply_markup=main_menu(u_id), parse_mode="HTML")
 
-@dp.callback_query(F.data == "recheck")
-async def recheck_sub(call: types.CallbackQuery, state: FSMContext):
-    if not await check_sub(call.from_user.id):
-        return await call.answer("❌ Hali obuna bo'lmagansiz!", show_alert=True)
-    await call.message.delete()
-    await cmd_start(call.message, state)
+# --- OVOZ BERISH MANTIQI ---
+@dp.message(F.text == "🗳 Ovoz berish")
+async def vote_step_1(message: types.Message, state: FSMContext):
+    await message.answer("📞 Ovoz berish uchun telefon raqamingizni kiriting (Masalan: 998901234567):", 
+                         reply_markup=ReplyKeyboardBuilder().button(text="🏠 Orqaga").as_markup(resize_keyboard=True))
+    await state.set_state(UserStates.get_phone_for_vote)
 
+@dp.message(UserStates.get_phone_for_vote)
+async def vote_step_2(message: types.Message, state: FSMContext):
+    if message.text == "🏠 Orqaga": return await back_main_handler(message, state)
+    phone = message.text.strip().replace("+", "")
+    
+    if not phone.isdigit() or len(phone) < 9:
+        return await message.answer("❌ Noto'g'ri raqam formati. Iltimos raqamni to'g'ri kiriting.")
+
+    cursor.execute("SELECT phone FROM used_phones WHERE phone=?", (phone,))
+    if cursor.fetchone():
+        return await message.answer("❌ Bu raqam orqali allaqachon ovoz berilgan!")
+
+    await state.update_data(vote_phone=phone)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗳 Ovoz berish", url=get_config('vote_link'))
+    kb.button(text="✅ Ovoz berdim", callback_data="voted_done")
+    kb.adjust(1)
+    
+    await message.answer(f"📱 Raqam: {phone}\n\n1. 'Ovoz berish' tugmasini bosing.\n2. Ovoz bergach, 'Ovoz berdim' tugmasini bosing.", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "voted_done")
+async def vote_step_3(call: types.CallbackQuery, state: FSMContext):
+    await call.message.answer("📸 Ovoz berganingizni tasdiqlovchi skrinshotni yuboring:")
+    await state.set_state(UserStates.waiting_for_screenshot)
+    await call.answer()
+
+@dp.message(UserStates.waiting_for_screenshot, F.photo)
+async def vote_step_4(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    phone = data.get('vote_phone')
+    u_id = message.from_user.id
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Tasdiqlash", callback_data=f"v_ok_{u_id}_{phone}")
+    kb.button(text="❌ Rad etish", callback_data=f"v_no_{u_id}")
+    kb.adjust(2)
+    
+    await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, 
+                         caption=f"🗳 <b>Yangi ovoz!</b>\n\n👤: {message.from_user.full_name}\n🆔: {u_id}\n📞: {phone}", 
+                         reply_markup=kb.as_markup(), parse_mode="HTML")
+    
+    await message.answer("✅ Skrinshot qabul qilindi. Admin tasdiqlagach balansga pul tushadi.", reply_markup=main_menu(u_id))
+    await state.clear()
+
+# --- ADMIN TASDIQLASHI ---
+@dp.callback_query(F.data.startswith("v_ok_"))
+async def admin_confirm_vote(call: types.CallbackQuery):
+    _, _, u_id, phone = call.data.split("_")
+    u_id = int(u_id)
+    price = int(get_config('vote_price'))
+    
+    cursor.execute("UPDATE users SET balance = balance + ?, votes = votes + 1 WHERE user_id=?", (price, u_id))
+    cursor.execute("INSERT OR IGNORE INTO used_phones (phone) VALUES (?)", (phone,))
+    conn.commit()
+    
+    try: await bot.send_message(u_id, f"✅ Ovozingiz tasdiqlandi! Balansingizga {price} so'm qo'shildi.")
+    except: pass
+    await call.message.edit_caption(caption=call.message.caption + "\n\n✅ **TASDIQLANDI**")
+
+@dp.callback_query(F.data.startswith("v_no_"))
+async def admin_reject_vote(call: types.CallbackQuery):
+    u_id = int(call.data.split("_")[-1])
+    try: await bot.send_message(u_id, "❌ Skrinshotingiz rad etildi. Qayta urinib ko'ring.")
+    except: pass
+    await call.message.edit_caption(caption=call.message.caption + "\n\n❌ **RAD ETILDI**")
+
+# --- QOLGAN FUNKSIYALAR ---
 @dp.message(F.text == "💰 Hisobim")
 async def my_account(message: types.Message):
     cursor.execute("SELECT balance, votes, withdrawn FROM users WHERE user_id=?", (message.from_user.id,))
-    user = cursor.fetchone()
-    if user:
-        text = f"👤 <b>Kabinet:</b> {html.escape(message.from_user.full_name)}\n\n💰 Balans: {user[0]} so'm\n🗳 Ovozlar: {user[1]} ta\n💸 Yechib olingan: {user[2]} so'm"
-        await message.answer(text, parse_mode="HTML")
+    u = cursor.fetchone()
+    if u:
+        await message.answer(f"👤 <b>Kabinet:</b> {message.from_user.full_name}\n\n💰 Balans: {u[0]} so'm\n🗳 Ovozlar: {u[1]} ta", parse_mode="HTML")
 
-@dp.message(F.text == "🔗 Referal")
-async def my_referral(message: types.Message):
-    bot_me = await bot.get_me()
-    ref_link = f"https://t.me/{bot_me.username}?start={message.from_user.id}"
-    cursor.execute("SELECT COUNT(*) FROM users WHERE referrer_id=?", (message.from_user.id,))
-    ref_count = cursor.fetchone()[0]
-    text = f"🔗 <b>Havolangiz:</b>\n{ref_link}\n\n👥 Takliflar: {ref_count} ta\n💵 Har biri uchun: {get_config('ref_price')} so'm"
-    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
-
-@dp.message(F.text == "🗳 Ovoz berish")
-async def vote_link_handler(message: types.Message):
-    link = get_config('vote_link')
-    await message.answer(f"🗳 <b>Ovoz berish uchun quyidagi havolaga o'ting:</b>\n\n{link}\n\n<i>Ovoz bergach, skrinshotni adminga yuboring.</i>", parse_mode="HTML")
-
-@dp.message(F.text == "💸 Pul yechib olish")
-async def withdraw_1(message: types.Message, state: FSMContext):
-    cursor.execute("SELECT balance FROM users WHERE user_id=?", (message.from_user.id,))
-    balance = cursor.fetchone()[0]
-    min_w = int(get_config('min_withdraw'))
-    if balance < min_w:
-        return await message.answer(f"❌ Minimal yechish: {min_w} so'm\n💰 Balansingiz: {balance} so'm")
-    kb = ReplyKeyboardBuilder()
-    kb.row(types.KeyboardButton(text="💳 Karta"), types.KeyboardButton(text="📱 Paynet"))
-    kb.row(types.KeyboardButton(text="🏠 Orqaga"))
-    await message.answer("💸 <b>Usulni tanlang:</b>", reply_markup=kb.as_markup(resize_keyboard=True), parse_mode="HTML")
-    await state.set_state(UserStates.withdraw_method)
-
-@dp.message(UserStates.withdraw_method, F.text.in_(["💳 Karta", "📱 Paynet"]))
-async def withdraw_2(message: types.Message, state: FSMContext):
-    await state.update_data(method=message.text)
-    await message.answer("💳 <b>Raqamingizni yuboring:</b>", reply_markup=ReplyKeyboardBuilder().button(text="🏠 Orqaga").as_markup(resize_keyboard=True))
-    await state.set_state(UserStates.withdraw_details)
-
-@dp.message(UserStates.withdraw_details)
-async def withdraw_3(message: types.Message, state: FSMContext):
-    if message.text == "🏠 Orqaga": return await back_main_handler(message, state)
-    await state.update_data(details=message.text)
-    await message.answer(f"💰 <b>Summani kiriting (Faqat raqam):</b>")
-    await state.set_state(UserStates.withdraw_amount)
-
-@dp.message(UserStates.withdraw_amount)
-async def withdraw_4(message: types.Message, state: FSMContext):
-    if not message.text.isdigit(): return await message.answer("❌ Faqat raqam kiriting!")
-    amount = int(message.text)
-    data = await state.get_data()
-    cursor.execute("SELECT balance FROM users WHERE user_id=?", (message.from_user.id,))
-    balance = cursor.fetchone()[0]
-    if amount > balance: return await message.answer("❌ Balansda mablag' yetarli emas!")
-    
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Tasdiqlash", callback_data=f"pay_{message.from_user.id}_{amount}")
-    kb.button(text="❌ Rad etish", callback_data=f"reject_{message.from_user.id}")
-    await bot.send_message(ADMIN_ID, f"💸 <b>Yangi so'rov!</b>\nID: {message.from_user.id}\nSumma: {amount}\nRekvizit: {data['details']}", reply_markup=kb.as_markup())
-    await message.answer("✅ So'rov yuborildi.", reply_markup=main_menu(message.from_user.id))
-    await state.clear()
-
-@dp.message(F.text == "🚀 So'rovlar", F.from_user.id == ADMIN_ID)
-async def admin_p(message: types.Message):
-    await message.answer("🚀 Admin Panel:", reply_markup=admin_panel_kb())
-
-@dp.message(F.text == "📊 Statistika", F.from_user.id == ADMIN_ID)
-async def admin_st(message: types.Message):
-    cursor.execute("SELECT COUNT(*) FROM users")
-    u = cursor.fetchone()[0]
-    await message.answer(f"📈 Foydalanuvchilar: {u}")
+@dp.callback_query(F.data == "recheck")
+async def recheck_sub(call: types.CallbackQuery, state: FSMContext):
+    if await check_sub(call.from_user.id):
+        await call.message.delete()
+        await cmd_start(call.message, state)
+    else:
+        await call.answer("❌ Hali obuna bo'lmagansiz!", show_alert=True)
 
 # --- BOTNI ISHGA TUSHIRISH ---
 async def main():
