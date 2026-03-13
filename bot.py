@@ -14,7 +14,7 @@ from aiogram.types import FSInputFile
 # --- KONFIGURATSIYA ---
 API_TOKEN = "8773028400:AAGBWrajqsRhTqp3nYsLTTaTtfRqGAHkyyY"
 ADMIN_ID = 7957774091
-LOG_GROUP_ID = -1003225370008 
+LOG_GROUP_ID = -1003225370008
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -25,26 +25,27 @@ cursor = conn.cursor()
 
 def db_setup():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY, username TEXT, name TEXT, phone TEXT, 
-        balance INTEGER DEFAULT 0, votes INTEGER DEFAULT 0, 
+        user_id INTEGER PRIMARY KEY, username TEXT, name TEXT, phone TEXT,
+        balance INTEGER DEFAULT 0, votes INTEGER DEFAULT 0,
         withdrawn INTEGER DEFAULT 0, referrer_id INTEGER, ref_paid INTEGER DEFAULT 0)''')
     
     cursor.execute('''CREATE TABLE IF NOT EXISTS channels (
         id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, title TEXT, url TEXT)''')
-    
+
     cursor.execute('''CREATE TABLE IF NOT EXISTS used_phones (phone TEXT PRIMARY KEY)''')
     cursor.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
-    
+
     default_start = ("<b>BOT AKTIV ISHLAMOQDA ✅</b>\n\n"
                      "⁉️ BOT ORQALI QANDAY QILIB OVOZ BERISH VIDEODA KO'RSATILGAN.\n\n"
                      "🎉 To'g'ri ovoz berganlarga pul shu zahoti o'tkazilmoqda!\n\n"
                      "🥳 Aziz {name}! 🗳 Ovoz berish tugmasini bosib, ovoz bering!")
-    
-    sets =[('vote_price', '5000'), ('ref_price', '1000'), 
+
+    sets = [('vote_price', '5000'), ('ref_price', '1000'), 
             ('min_withdraw', '15000'), ('vote_link', 'https://t.me/ochiqbudjetbot?start=053465392013'),
             ('payment_channel', 'O\'rnatilmagan'),
             ('start_text', default_start),
             ('start_video_id', '')]
+    
     for k, v in sets:
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
     conn.commit()
@@ -57,21 +58,13 @@ def get_config(key):
     res = cursor.fetchone()
     return res[0] if res else ""
 
-def set_config(key, value):
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-    conn.commit()
-
-async def log_to_group(text):
-    try: await bot.send_message(LOG_GROUP_ID, text)
-    except Exception as e: logging.error(f"Guruhga yozishda xato: {e}")
-
 async def check_sub(user_id):
     cursor.execute("SELECT channel_id FROM channels")
     rows = cursor.fetchall()
     for (ch_id,) in rows:
         try:
             m = await bot.get_chat_member(ch_id, user_id)
-            if m.status in['left', 'kicked', 'member_not_found']: return False
+            if m.status in ['left', 'kicked', 'member_not_found']: return False
         except: return False
     return True
 
@@ -79,16 +72,6 @@ async def check_sub(user_id):
 class UserStates(StatesGroup):
     get_phone_for_vote = State()
     waiting_for_screenshot = State()
-    withdraw_method = State()
-    withdraw_details = State()
-    withdraw_amount = State()
-
-class AdminState(StatesGroup):
-    broadcast_text = State()
-    broadcast_forward = State()
-    add_ch_id = State()
-    add_ch_title = State()
-    add_ch_url = State()
 
 # --- KLAVIATURALAR ---
 def main_menu(user_id):
@@ -97,13 +80,6 @@ def main_menu(user_id):
     kb.row(types.KeyboardButton(text="💰 Hisobim"), types.KeyboardButton(text="💸 Pul yechib olish"))
     kb.row(types.KeyboardButton(text="🔗 Referal"), types.KeyboardButton(text="🏆 Yutuqlar"))
     if user_id == ADMIN_ID: kb.row(types.KeyboardButton(text="🚀 So'rovlar"))
-    return kb.as_markup(resize_keyboard=True)
-
-def admin_panel_kb():
-    kb = ReplyKeyboardBuilder()
-    kb.row(types.KeyboardButton(text="✉️ Oddiy xabar"), types.KeyboardButton(text="📩 Forward xabar"))
-    kb.row(types.KeyboardButton(text="📄 Ulangan kanallar"), types.KeyboardButton(text="📢 Kanal ulash"))
-    kb.row(types.KeyboardButton(text="📊 Statistika"), types.KeyboardButton(text="🏠 Orqaga"))
     return kb.as_markup(resize_keyboard=True)
 
 # --- HANDLERS ---
@@ -136,52 +112,43 @@ async def cmd_start(message: types.Message, state: FSMContext):
         for t, u in cursor.fetchall(): kb.button(text=t, url=u)
         kb.button(text="✅ Tasdiqlash", callback_data="recheck")
         kb.adjust(1)
-        return await message.answer("❌ <b>Botdan foydalanish uchun quyidagi kanallarga obuna bo'lishingiz shart:</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
+        return await message.answer("❌ <b>Obuna bo'ling:</b>", reply_markup=kb.as_markup(), parse_mode="HTML")
 
     start_msg = get_config('start_text').replace("{name}", html.escape(name))
-    vid_id = get_config('start_video_id')
-    
-    try:
-        if vid_id and vid_id != "":
-            await message.answer_video(vid_id, caption=start_msg, reply_markup=main_menu(u_id), parse_mode="HTML")
-        elif os.path.exists("11.mp4"):
-            msg = await message.answer_video(FSInputFile("11.mp4"), caption=start_msg, reply_markup=main_menu(u_id), parse_mode="HTML")
-            set_config('start_video_id', msg.video.file_id)
-        else:
-            await message.answer(start_msg, reply_markup=main_menu(u_id), parse_mode="HTML")
-    except:
-        await message.answer(start_msg, reply_markup=main_menu(u_id), parse_mode="HTML")
+    await message.answer(start_msg, reply_markup=main_menu(u_id), parse_mode="HTML")
 
 # --- OVOZ BERISH MANTIQI ---
 @dp.message(F.text == "🗳 Ovoz berish")
 async def vote_step_1(message: types.Message, state: FSMContext):
-    await message.answer("📞 Ovoz berish uchun telefon raqamingizni kiriting (Masalan: 998901234567):", 
+    await message.answer("📞 Ovoz berish uchun telefon raqamingizni yuboring:\n(Masalan: 998901234567)",
                          reply_markup=ReplyKeyboardBuilder().button(text="🏠 Orqaga").as_markup(resize_keyboard=True))
     await state.set_state(UserStates.get_phone_for_vote)
 
 @dp.message(UserStates.get_phone_for_vote)
 async def vote_step_2(message: types.Message, state: FSMContext):
     if message.text == "🏠 Orqaga": return await back_main_handler(message, state)
-    phone = message.text.strip().replace("+", "")
     
+    phone = message.text.strip().replace("+", "")
     if not phone.isdigit() or len(phone) < 9:
-        return await message.answer("❌ Noto'g'ri raqam formati. Iltimos raqamni to'g'ri kiriting.")
+        return await message.answer("❌ Noto'g'ri raqam formati.")
 
     cursor.execute("SELECT phone FROM used_phones WHERE phone=?", (phone,))
     if cursor.fetchone():
-        return await message.answer("❌ Bu raqam orqali allaqachon ovoz berilgan!")
+        return await message.answer("❌ Bu raqam ishlatilgan!")
 
     await state.update_data(vote_phone=phone)
+    
     kb = InlineKeyboardBuilder()
-    kb.button(text="🗳 Ovoz berish", url=get_config('vote_link'))
+    kb.button(text="🔗 Ovoz berish (Saytga o'tish)", url=get_config('vote_link'))
     kb.button(text="✅ Ovoz berdim", callback_data="voted_done")
     kb.adjust(1)
-    
-    await message.answer(f"📱 Raqam: {phone}\n\n1. 'Ovoz berish' tugmasini bosing.\n2. Ovoz bergach, 'Ovoz berdim' tugmasini bosing.", reply_markup=kb.as_markup())
+
+    await message.answer(f"✅ Raqam qabul qilindi: {phone}\n\nEndi quyidagi tugma orqali ovoz bering va skrinshotni tayyorlang.", 
+                         reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data == "voted_done")
 async def vote_step_3(call: types.CallbackQuery, state: FSMContext):
-    await call.message.answer("📸 Ovoz berganingizni tasdiqlovchi skrinshotni yuboring:")
+    await call.message.answer("📸 Endi ovoz berganingizni tasdiqlovchi skrinshotni yuboring:")
     await state.set_state(UserStates.waiting_for_screenshot)
     await call.answer()
 
@@ -190,58 +157,53 @@ async def vote_step_4(message: types.Message, state: FSMContext):
     data = await state.get_data()
     phone = data.get('vote_phone')
     u_id = message.from_user.id
-    
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Tasdiqlash", callback_data=f"v_ok_{u_id}_{phone}")
-    kb.button(text="❌ Rad etish", callback_data=f"v_no_{u_id}")
+    # callback_data uzunligi chegaralangan, shuning uchun formatni qisqartiramiz
+    kb.button(text="✅ Tasdiqlash", callback_data=f"vok_{u_id}_{phone}")
+    kb.button(text="❌ Rad etish", callback_data=f"vno_{u_id}")
     kb.adjust(2)
-    
+
     await bot.send_photo(ADMIN_ID, message.photo[-1].file_id, 
                          caption=f"🗳 <b>Yangi ovoz!</b>\n\n👤: {message.from_user.full_name}\n🆔: {u_id}\n📞: {phone}", 
                          reply_markup=kb.as_markup(), parse_mode="HTML")
-    
-    await message.answer("✅ Skrinshot qabul qilindi. Admin tasdiqlagach balansga pul tushadi.", reply_markup=main_menu(u_id))
+
+    await message.answer("✅ Rahmat! Skrinshot adminga yuborildi. Tekshirilgach pul tushadi.", reply_markup=main_menu(u_id))
     await state.clear()
 
 # --- ADMIN TASDIQLASHI ---
-@dp.callback_query(F.data.startswith("v_ok_"))
+@dp.callback_query(F.data.startswith("vok_"))
 async def admin_confirm_vote(call: types.CallbackQuery):
-    _, _, u_id, phone = call.data.split("_")
-    u_id = int(u_id)
+    # vok_ID_PHONE formatidan ajratib olish
+    parts = call.data.split("_")
+    u_id = int(parts[1])
+    phone = parts[2]
+    
     price = int(get_config('vote_price'))
     
     cursor.execute("UPDATE users SET balance = balance + ?, votes = votes + 1 WHERE user_id=?", (price, u_id))
     cursor.execute("INSERT OR IGNORE INTO used_phones (phone) VALUES (?)", (phone,))
     conn.commit()
+
+    try: await bot.send_message(u_id, f"✅ Tabriklaymiz! Ovozingiz tasdiqlandi. Hisobingizga {price} so'm qo'shildi.")
+    except: pass
     
-    try: await bot.send_message(u_id, f"✅ Ovozingiz tasdiqlandi! Balansingizga {price} so'm qo'shildi.")
-    except: pass
-    await call.message.edit_caption(caption=call.message.caption + "\n\n✅ **TASDIQLANDI**")
+    await call.message.edit_caption(caption=call.message.caption + "\n\n✅ <b>TASDIQLANDI</b>", parse_mode="HTML")
 
-@dp.callback_query(F.data.startswith("v_no_"))
+@dp.callback_query(F.data.startswith("vno_"))
 async def admin_reject_vote(call: types.CallbackQuery):
-    u_id = int(call.data.split("_")[-1])
-    try: await bot.send_message(u_id, "❌ Skrinshotingiz rad etildi. Qayta urinib ko'ring.")
+    u_id = int(call.data.split("_")[1])
+    try: await bot.send_message(u_id, "❌ Ovozingiz admin tomonidan rad etildi. Skrinshot xato bo'lishi mumkin.")
     except: pass
-    await call.message.edit_caption(caption=call.message.caption + "\n\n❌ **RAD ETILDI**")
+    await call.message.edit_caption(caption=call.message.caption + "\n\n❌ <b>RAD ETILDI</b>", parse_mode="HTML")
 
-# --- QOLGAN FUNKSIYALAR ---
 @dp.message(F.text == "💰 Hisobim")
 async def my_account(message: types.Message):
-    cursor.execute("SELECT balance, votes, withdrawn FROM users WHERE user_id=?", (message.from_user.id,))
+    cursor.execute("SELECT balance, votes FROM users WHERE user_id=?", (message.from_user.id,))
     u = cursor.fetchone()
     if u:
-        await message.answer(f"👤 <b>Kabinet:</b> {message.from_user.full_name}\n\n💰 Balans: {u[0]} so'm\n🗳 Ovozlar: {u[1]} ta", parse_mode="HTML")
+        await message.answer(f"👤 <b>Foydalanuvchi:</b> {message.from_user.full_name}\n💰 Balans: {u[0]} so'm\n🗳 Ovozlar: {u[1]} ta", parse_mode="HTML")
 
-@dp.callback_query(F.data == "recheck")
-async def recheck_sub(call: types.CallbackQuery, state: FSMContext):
-    if await check_sub(call.from_user.id):
-        await call.message.delete()
-        await cmd_start(call.message, state)
-    else:
-        await call.answer("❌ Hali obuna bo'lmagansiz!", show_alert=True)
-
-# --- BOTNI ISHGA TUSHIRISH ---
 async def main():
     logging.basicConfig(level=logging.INFO)
     await bot.delete_webhook(drop_pending_updates=True)
